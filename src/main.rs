@@ -7,12 +7,11 @@ use std::{
     },
     time::Duration,
 };
-use anyhow::{Result, Error};
+use anyhow::Result;
 use gpiod::{Chip, Lines, Output, Options, Active, Drive};
 
 const RAMP_START: f64 = 40.;
 const RAMP_END: f64 = 60.;
-const FULL_PULSE: Duration = Duration::from_millis(1);
 const SAMPLE_RATE: Duration = Duration::from_millis(500);
 
 static TERMINATION_SIGNAL: AtomicBool = AtomicBool::new(false);
@@ -66,7 +65,7 @@ impl Fan {
 }
 
 struct FanInner {
-    pwm: f64,
+    on: bool,
     #[allow(unused)]
     chip: Chip,
     lines: Lines<Output>,
@@ -82,13 +81,15 @@ impl FanInner {
             .values([true])
             .consumer("fan-ctrl");
         let lines = chip.request_lines(opts)?;
-        Ok(Self { pwm: 1., chip, lines, rx })
+        let this = Self { on: true, chip, lines, rx };
+        this.set_on()?;
+        Ok(this)
     }
 
     fn run(mut self) -> Result<()> {
         loop {
             match self.rx.try_recv() {
-                Ok(temp) => self.set_temp(temp),
+                Ok(temp) => self.set_temp(temp)?,
                 Err(TryRecvError::Disconnected) => {
                     // leave fan on
                     self.set_on()?;
@@ -96,41 +97,29 @@ impl FanInner {
                 }
                 Err(TryRecvError::Empty) => (),
             }
-            self.pulse()?;
+            sleep(SAMPLE_RATE);
         }
     }
     
-    fn set_temp(&mut self, temp: f64) {
-        self.pwm = ((temp - RAMP_START) / (RAMP_END - RAMP_START)).clamp(0., 1.);
-        if !self.pwm.is_finite() {
-            self.pwm = 1.;
-        }
+    fn set_temp(&mut self, temp: f64) -> Result<()> {
         println!("Temp: {temp}°C");
-        println!("PWM: {}", self.pwm);
-    }
-
-    fn pulse(&self) -> Result<()> {
-        if self.pwm >= 1. {
-            self.set_on()?;
-            sleep(FULL_PULSE);
-        } else if self.pwm <= 0. {
+        if self.on && temp <= RAMP_START {
+            self.on = false;
             self.set_off()?;
-            sleep(FULL_PULSE);
-        } else {
+        } else if !self.on && temp >= RAMP_END {
+            self.on = true;
             self.set_on()?;
-            sleep(FULL_PULSE.mul_f64(self.pwm));
-            self.set_off()?;
-            sleep(FULL_PULSE.mul_f64(1. - self.pwm));
         }
+        println!("Fan: {}", if self.on { "on" } else { "off" });
         Ok(())
     }
 
-    fn set_on(&self) -> Result<(), Error> {
+    fn set_on(&self) -> Result<()> {
         self.lines.set_values([true])?;
         Ok(())
     }
 
-    fn set_off(&self) -> Result<(), Error> {
+    fn set_off(&self) -> Result<()> {
         self.lines.set_values([false])?;
         Ok(())
     }
